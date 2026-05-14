@@ -22,57 +22,54 @@ import yaml
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, NamedStyle, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from yaml.constructor import Constructor
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format='%(asctime)s: %(levelname)s: %(message)s')
 
+PRE_DEFINED_UNIQUE_IDENTIFIERS = ['id', 'name', 'group']
 
-def add_bool(self, node):
-    """Construct a YAML bool node as a plain string.
 
-    Overrides the default YAML bool constructor so that ``true``/``false``
-    values are preserved as strings rather than converted to Python bools.
+class _OrderedSafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that preserves mapping key order as ``OrderedDict``.
 
-    Args:
-        node: The YAML scalar node being constructed.
-
-    Returns:
-        str: Scalar string value of the node.
+    Booleans are returned as plain strings (``"true"`` / ``"false"``) rather
+    than Python ``bool`` values so that round-tripping through Excel is lossless.
     """
-    return self.construct_scalar(node)
+
+    def construct_ordered_mapping(self, node):
+        """Construct a YAML mapping node as an ``OrderedDict``."""
+        self.flatten_mapping(node)
+        return OrderedDict(self.construct_pairs(node))
+
+    def construct_yaml_bool(self, node):
+        """Construct YAML bool nodes as plain strings instead of Python bools."""
+        return self.construct_scalar(node)
 
 
-Constructor.add_constructor('tag:yaml.org,2002:bool', add_bool)
+_OrderedSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _OrderedSafeLoader.construct_ordered_mapping)
+_OrderedSafeLoader.add_constructor(
+    'tag:yaml.org,2002:bool',
+    _OrderedSafeLoader.construct_yaml_bool)
 
 
-def ordered_load(stream, Loader=yaml.Loader, object_pairs_hook=OrderedDict):
+def ordered_load(stream):
     """Load YAML from *stream* while preserving mapping key order.
 
-    Subclasses *Loader* to replace the default mapping constructor with one
-    that uses *object_pairs_hook* (``OrderedDict`` by default).
+    Booleans are returned as plain strings so that round-tripping through
+    Excel is lossless.
 
     Args:
         stream: File-like object or string containing YAML content.
-        Loader (yaml.Loader): Base PyYAML Loader to subclass.
-        object_pairs_hook (type): Callable used to build mappings from pairs.
 
     Returns:
         OrderedDict: Parsed YAML with preserved key ordering.
     """
-    class OrderedLoader(Loader):  # pylint: disable=too-few-public-methods
-        """Private loader subclass that builds mappings via *object_pairs_hook*."""
-
-    def construct_mapping(loader, node):
-        loader.flatten_mapping(node)
-        return object_pairs_hook(loader.construct_pairs(node))
-    OrderedLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-        construct_mapping)
-    return yaml.load(stream, OrderedLoader)
+    return yaml.load(stream, _OrderedSafeLoader)
 
 
-class YamlToExcel (object):
+class YamlToExcel:
     """Convert one or more YAML files into a single Excel workbook.
 
     Top-level YAML dict values become named sheets, list values become sheets
@@ -90,10 +87,7 @@ class YamlToExcel (object):
                 the output ``.xlsx`` path; if omitted the workbook is saved as
                 ``all.xlsx``.
         """
-        if isinstance(sysArgs, tuple):
-            self.file_params = sysArgs[0]
-        else:
-            self.file_params = sysArgs
+        self.file_params = sysArgs[0] if sysArgs else []
 
     def column_auto_fit(self, ws, header_value, cell_value, column_index):
         """Resize a worksheet column to fit its header and cell content.
@@ -161,7 +155,10 @@ class YamlToExcel (object):
             cell_header_value = ws.cell(row=row_id, column=column_id).value
             logging.debug("$$ cell_header_value :: %s %s ",
                           cell_header_value, column_name)
-            if cell_header_value == column_name or (column_name and cell_header_value and (cell_header_value == column_name[1:] or cell_header_value[1:] == column_name)):
+            if (cell_header_value == column_name
+                    or (column_name and cell_header_value
+                        and (cell_header_value == column_name[1:]
+                             or cell_header_value[1:] == column_name))):
                 logging.debug(
                     "###Existing column header found in the sheet....")
                 existing_column_id = column_id
@@ -200,8 +197,6 @@ class YamlToExcel (object):
         if isinstance(repeatData, OrderedDict):
             for repkey in repeatData:
 
-                row_column_index = self.add_column_header(ws, repkey, str(
-                    repeatData[repkey]), hostname, tempRIndex)
                 row_column_index = self.add_column_header(ws, repkey, str(
                     repeatData[repkey]), hostname, tempRIndex)
 
@@ -249,12 +244,10 @@ class YamlToExcel (object):
             dictData = OrderedDict()
         tDictData = OrderedDict(dictData)
 
-        pre_defined_unique_identifiers = ['id', 'name', 'group']
-
         is_pk_exist = False
         unique_key = ""
         if put_unique_identifier:
-            for pk in pre_defined_unique_identifiers:
+            for pk in PRE_DEFINED_UNIQUE_IDENTIFIERS:
                 logging.debug("Unique key %s ", pk)
                 if isinstance(data, OrderedDict):
                     if pk in data:
@@ -719,7 +712,7 @@ class YamlToExcel (object):
                 logging.debug("YAML or YML file: %s", file_name)
 
                 with open(file_name, 'r', encoding='utf-8') as stream:
-                    content = ordered_load(stream, yaml.SafeLoader)
+                    content = ordered_load(stream)
 
                 host_name = file_name
                 self.parse_yaml_files(
@@ -727,7 +720,6 @@ class YamlToExcel (object):
                 is_empty = False
 
         if not is_empty:
-            #self.put_border(wb)
             logging.debug("YAML to excel conversion completed.")
             if spreadsheet_file_name:
                 wb.save(spreadsheet_file_name)

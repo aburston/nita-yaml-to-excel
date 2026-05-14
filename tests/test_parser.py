@@ -1,4 +1,3 @@
-# pylint: disable=missing-function-docstring,line-too-long
 """ ********************************************************
 
 Project: nita-yaml-to-excel
@@ -331,6 +330,7 @@ class ParserTestCase(unittest.TestCase):
           complex_list_with_integers
           )
     def testSimpleStruct(self, value):
+        """Round-trip YAML through Excel and back; result must equal the original."""
         ini_cont = yaml.safe_load(value)
         with open('test.yaml', 'w', encoding='utf-8') as outfile:
             outfile.write(

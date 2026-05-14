@@ -28,45 +28,48 @@ logging.basicConfig(stream=sys.stderr, level=logging.WARNING,
 pre_defined_unique_identifiers = ['id', 'name', 'group']
 
 
-def ordered_dump(data, stream=None, Dumper=yaml.Dumper, **kwds):
+class _OrderedSafeDumper(yaml.SafeDumper):
+    """Safe YAML dumper that correctly serialises ``OrderedDict`` and ``None``."""
+
+    def represent_ordered_dict(self, mapping):
+        """Represent an ``OrderedDict`` as a regular YAML mapping."""
+        return self.represent_mapping(
+            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+            mapping.items())
+
+    def represent_none(self, _value):
+        """Represent ``None`` as an empty YAML string rather than ``null``."""
+        return self.represent_scalar('tag:yaml.org,2002:null', '')
+
+
+_OrderedSafeDumper.add_representer(OrderedDict, _OrderedSafeDumper.represent_ordered_dict)
+_OrderedSafeDumper.add_representer(type(None), _OrderedSafeDumper.represent_none)
+
+
+def ordered_dump(data, stream=None, **kwds):
     """Dump *data* to YAML while preserving ``OrderedDict`` key order.
 
-    Registers representers for ``OrderedDict`` (plain mapping) and ``None``
-    (empty string) before delegating to :func:`yaml.dump`.
+    Uses a safe dumper, so arbitrary Python objects cannot be serialised.
+    ``None`` values are written as empty strings rather than ``null``.
 
     Args:
         data: Python object to serialise.
         stream: File-like object to write to, or ``None`` to return a string.
-        Dumper (yaml.Dumper): Base PyYAML Dumper class.
         **kwds: Extra keyword arguments forwarded to :func:`yaml.dump`.
 
     Returns:
         str | None: YAML string when *stream* is ``None``, else ``None``.
     """
-    class OrderedDumper(Dumper):  # pylint: disable=too-few-public-methods
-        """Private YAML dumper subclass with OrderedDict and None representers."""
-
-    def _dict_representer(dumper, data):
-        return dumper.represent_mapping(
-            yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-            data.items())
-    OrderedDumper.add_representer(OrderedDict, _dict_representer)
-    OrderedDumper.add_representer(
-        type(None),
-        lambda dumper, value: dumper.represent_scalar(
-            'tag:yaml.org,2002:null', '')
-    )
-    return yaml.dump(data, stream, OrderedDumper, **kwds)
+    return yaml.dump(data, stream, _OrderedSafeDumper, **kwds)
 
 
-def stripper(self, data):
+def stripper(data):
     """Recursively remove empty ``OrderedDict`` values from *data*.
 
     Drops keys whose value is an empty ``OrderedDict`` or the bare ``list``
     type object; nested dicts are stripped recursively.
 
     Args:
-        self: Unused – present because the call site passes ``self``.
         data (OrderedDict): The mapping to clean.
 
     Returns:
@@ -75,13 +78,13 @@ def stripper(self, data):
     new_data = OrderedDict()
     for k, v in data.items():
         if isinstance(v, OrderedDict):
-            v = stripper(self, v)
+            v = stripper(v)
         if v not in (list, OrderedDict()):
             new_data[k] = v
     return new_data
 
 
-class ExcelToYaml(object):
+class ExcelToYaml:
     """Convert an Excel workbook produced by ``YamlToExcel`` back to YAML files.
 
     Sheet layout conventions assumed:
@@ -130,14 +133,13 @@ class ExcelToYaml(object):
         logging.debug("Base sheet data ::: %s ", base_sheet_data)
         for host_file in base_sheet_data:
 
-            # 			temp_dict_data = ast.literal_eval(json.dumps(base_sheet_data[host_file]))
-            # base_yaml_content=ordered_dump(base_sheet_data[host_file], Dumper=yaml.SafeD
-
             base_sheet_data[host_file] = stripper(
-                self, base_sheet_data[host_file])
+                base_sheet_data[host_file])
 
-            base_yaml_content = ordered_dump(OrderedDict(
-                base_sheet_data[host_file]), Dumper=yaml.SafeDumper, default_flow_style=False, explicit_start=True)
+            base_yaml_content = ordered_dump(
+                OrderedDict(base_sheet_data[host_file]),
+                default_flow_style=False,
+                explicit_start=True)
             logging.debug("Final data-")
             logging.debug(base_yaml_content)
 

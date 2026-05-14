@@ -17,8 +17,6 @@ to the terms and conditions of the respective license as noted in the Third-Part
 source code file.
 
 ******************************************************** """
-# pylint: disable=attribute-defined-outside-init,missing-function-docstring
-
 import os
 from collections import OrderedDict
 
@@ -87,29 +85,42 @@ class TestOrderedLoad:
 class TestYamlToExcelParseCellValue:
     """Tests for :meth:`YamlToExcel.parse_cell_value`."""
 
+    y: YamlToExcel
+
     def setup_method(self):
+        """Initialise converter instance for each test."""
         self.y = YamlToExcel([])
 
     def test_bool_true_becomes_string(self):
+        """True is coerced to the string 'True'."""
         assert self.y.parse_cell_value(True) == "True"
 
     def test_bool_false_becomes_string(self):
+        """False is coerced to the string 'False'."""
         assert self.y.parse_cell_value(False) == "False"
 
     def test_int_unchanged(self):
+        """Integer values pass through unchanged."""
         assert self.y.parse_cell_value(42) == 42
 
     def test_float_becomes_string(self):
+        """Float values are converted to strings."""
         assert self.y.parse_cell_value(3.14) == "3.14"
 
     def test_none_becomes_string(self):
+        """None is converted to the string 'None'."""
         assert self.y.parse_cell_value(None) == "None"
 
 
 class TestColumnAutoFit:
     """Tests for :meth:`YamlToExcel.column_auto_fit`."""
 
+    y: YamlToExcel
+    wb: Workbook
+    ws: object
+
     def setup_method(self):
+        """Initialise workbook and worksheet for each test."""
         self.y = YamlToExcel([])
         self.wb = Workbook()
         self.ws = self.wb.active
@@ -229,20 +240,19 @@ class TestOrderedDump:
     def test_preserves_order(self):
         """Keys appear in insertion order in the YAML output."""
         data = OrderedDict([("z", 1), ("a", 2), ("m", 3)])
-        result = ordered_dump(data, Dumper=yaml.SafeDumper,
-                              default_flow_style=False)
+        result = ordered_dump(data, default_flow_style=False)
         lines = [l.split(":")[0] for l in result.strip().splitlines()]
         assert lines == ["z", "a", "m"]
 
     def test_none_becomes_empty_string(self):
         """``None`` values are emitted as empty YAML strings."""
         data = OrderedDict([("key", None)])
-        result = ordered_dump(data, Dumper=yaml.SafeDumper)
+        result = ordered_dump(data)
         assert "key:" in result
 
     def test_returns_string_when_no_stream(self):
         """Returns a ``str`` when no stream is provided."""
-        result = ordered_dump(OrderedDict([("k", "v")]), Dumper=yaml.SafeDumper)
+        result = ordered_dump(OrderedDict([("k", "v")]))
         assert isinstance(result, str)
 
 
@@ -255,7 +265,7 @@ class TestStripper:
             ("keep", "value"),
             ("drop", OrderedDict()),
         ])
-        result = stripper(None, data)
+        result = stripper(data)
         assert "keep" in result
         assert "drop" not in result
 
@@ -263,14 +273,14 @@ class TestStripper:
         """Strips empty dicts inside nested ``OrderedDict`` values."""
         inner = OrderedDict([("a", "1"), ("empty", OrderedDict())])
         data = OrderedDict([("outer", inner)])
-        result = stripper(None, data)
+        result = stripper(data)
         assert "a" in result["outer"]
         assert "empty" not in result["outer"]
 
     def test_preserves_non_empty_values(self):
         """Non-empty dict values are retained."""
         data = OrderedDict([("x", OrderedDict([("y", "z")]))])
-        result = stripper(None, data)
+        result = stripper(data)
         assert result["x"]["y"] == "z"
 
 

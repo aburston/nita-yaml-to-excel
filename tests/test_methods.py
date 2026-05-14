@@ -1,4 +1,3 @@
-# pylint: disable=missing-function-docstring,line-too-long
 """ ********************************************************
 
 Project: nita-yaml-to-excel
@@ -27,6 +26,7 @@ class ParserMethodsTestCase(unittest.TestCase):
 
     @data(5, False, '12.12.12.12', "Test")
     def testParseCellValue(self, value):
+        """parse_cell_value converts bools to str and passes ints through unchanged."""
         if isinstance(value, bool):
             temp_value = str(value)
         elif isinstance(value, int):
@@ -37,6 +37,7 @@ class ParserMethodsTestCase(unittest.TestCase):
         self.assertEqual(yaml2excel.parse_cell_value(value), temp_value)
 
     def testBuildListData(self):
+        """build_list_data returns only the list-valued keys from the input dict."""
         input_data = OrderedDict({"boot_server": "10.1.10.134",
                                   "radius_server": "10.1.10.135",
                                   "servers": [
@@ -52,6 +53,7 @@ class ParserMethodsTestCase(unittest.TestCase):
             input_data), expected_result_data)
 
     def testBuildDictData(self):
+        """build_dict_data flattens nested dicts and handles prefixes and unique identifiers."""
 
         input_data = OrderedDict({"boot_server": "10.1.10.134",
                                   "radius_server": "10.1.10.135",
