@@ -1,0 +1,36 @@
+[MASTER]
+# Use multiple processes to speed up Pylint
+jobs = 1
+
+[MESSAGES CONTROL]
+disable =
+    # Structural complexity – the parsing functions are inherently deep;
+    # refactoring them is out of scope for a lint pass.
+    too-many-arguments,
+    too-many-positional-arguments,
+    too-many-branches,
+    too-many-statements,
+    too-many-locals,
+    too-many-ancestors,
+    too-many-nested-blocks,
+    # The camelCase arg/variable names in the parsing core and the legacy
+    # unittest-style test method names (testFoo) are intentionally kept to
+    # minimise diff noise; suppress naming warnings rather than rename.
+    invalid-name,
+    # TODO comments are tracked in the issue tracker; suppress here.
+    fixme,
+    # Inner loader/dumper classes intentionally have no public methods.
+    too-few-public-methods,
+    # R0205 is suppressed because we keep (object) bases where removal could
+    # affect pickling/copy behaviour in older integrations.
+    useless-object-inheritance
+
+[FORMAT]
+# License headers push lines over 100; ignore those long lines.
+max-line-length = 120
+
+[DESIGN]
+max-args = 10
+max-locals = 25
+max-branches = 50
+max-statements = 110

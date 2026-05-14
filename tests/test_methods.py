@@ -12,21 +12,24 @@ Third-Party Code: This code may depend on other components under separate copyri
 
 ******************************************************** """
 
-from yamltoexcel import yaml2xls
-from yamltoexcel import xls2yaml
 import unittest
-import yaml
-import os
-from ddt import ddt, data
 from collections import OrderedDict
+
+from ddt import ddt, data
+
+from yamltoexcel import yaml2xls
 
 
 @ddt
 class ParserMethodsTestCase(unittest.TestCase):
+    """Unit tests for yaml2xls parser helper methods."""
 
     @data(5, False, '12.12.12.12', "Test")
     def testParseCellValue(self, value):
-        if type(value) is int:
+        """parse_cell_value converts bools to str and passes ints through unchanged."""
+        if isinstance(value, bool):
+            temp_value = str(value)
+        elif isinstance(value, int):
             temp_value = value
         else:
             temp_value = str(value)
@@ -34,6 +37,7 @@ class ParserMethodsTestCase(unittest.TestCase):
         self.assertEqual(yaml2excel.parse_cell_value(value), temp_value)
 
     def testBuildListData(self):
+        """build_list_data returns only the list-valued keys from the input dict."""
         input_data = OrderedDict({"boot_server": "10.1.10.134",
                                   "radius_server": "10.1.10.135",
                                   "servers": [
@@ -49,6 +53,7 @@ class ParserMethodsTestCase(unittest.TestCase):
             input_data), expected_result_data)
 
     def testBuildDictData(self):
+        """build_dict_data flattens nested dicts and handles prefixes and unique identifiers."""
 
         input_data = OrderedDict({"boot_server": "10.1.10.134",
                                   "radius_server": "10.1.10.135",

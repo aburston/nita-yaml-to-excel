@@ -14,52 +14,93 @@ Third-Party Code: This code may depend on other components under separate copyri
 
 ******************************************************** """
 
-import yaml
+import logging
 import sys
-import os
 from collections import OrderedDict
 
+import yaml
 from openpyxl import Workbook
-from openpyxl.styles import Font, NamedStyle, PatternFill, Border, Side, Protection, Alignment
+from openpyxl.styles import Alignment, Border, Font, NamedStyle, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from yaml.constructor import Constructor
 
-import logging
 logging.basicConfig(stream=sys.stderr, level=logging.INFO,
                     format='%(asctime)s: %(levelname)s: %(message)s')
 
-style_count = 0
+PRE_DEFINED_UNIQUE_IDENTIFIERS = ['id', 'name', 'group']
 
 
-def add_bool(self, node):
-    return self.construct_scalar(node)
+class _OrderedSafeLoader(yaml.SafeLoader):
+    """Safe YAML loader that preserves mapping key order as ``OrderedDict``.
+
+    Booleans are returned as plain strings (``"true"`` / ``"false"``) rather
+    than Python ``bool`` values so that round-tripping through Excel is lossless.
+    """
+
+    def construct_ordered_mapping(self, node):
+        """Construct a YAML mapping node as an ``OrderedDict``."""
+        self.flatten_mapping(node)
+        return OrderedDict(self.construct_pairs(node))
+
+    def construct_yaml_bool(self, node):
+        """Construct YAML bool nodes as plain strings instead of Python bools."""
+        return self.construct_scalar(node)
 
 
-Constructor.add_constructor(u'tag:yaml.org,2002:bool', add_bool)
+_OrderedSafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _OrderedSafeLoader.construct_ordered_mapping)
+_OrderedSafeLoader.add_constructor(
+    'tag:yaml.org,2002:bool',
+    _OrderedSafeLoader.construct_yaml_bool)
 
 
-def ordered_load(stream, Loader=yaml.Loader, object_pairs_hook=OrderedDict):
-    class OrderedLoader(Loader):
-        pass
+def ordered_load(stream):
+    """Load YAML from *stream* while preserving mapping key order.
 
-    def construct_mapping(loader, node):
-        loader.flatten_mapping(node)
-        return object_pairs_hook(loader.construct_pairs(node))
-    OrderedLoader.add_constructor(
-        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-        construct_mapping)
-    return yaml.load(stream, OrderedLoader)
+    Booleans are returned as plain strings so that round-tripping through
+    Excel is lossless.
+
+    Args:
+        stream: File-like object or string containing YAML content.
+
+    Returns:
+        OrderedDict: Parsed YAML with preserved key ordering.
+    """
+    return yaml.load(stream, _OrderedSafeLoader)
 
 
-class YamlToExcel (object):
+class YamlToExcel:
+    """Convert one or more YAML files into a single Excel workbook.
+
+    Top-level YAML dict values become named sheets, list values become sheets
+    suffixed with ``+``, and scalars are written to the ``base`` sheet.
+    The workbook can be converted back to YAML via
+    :class:`~yamltoexcel.xls2yaml.ExcelToYaml`.
+    """
+
     def __init__(self, *sysArgs):
-        if type(sysArgs) is tuple:
-            self.file_params = sysArgs[0]
-        else:
-            self.file_params = sysArgs
+        """Initialise the converter with a sequence of file paths.
 
-    # Adjust column width
+        Args:
+            *sysArgs: Either a single iterable of file-path strings or multiple
+                positional string arguments.  The final entry may optionally be
+                the output ``.xlsx`` path; if omitted the workbook is saved as
+                ``all.xlsx``.
+        """
+        self.file_params = sysArgs[0] if sysArgs else []
+
     def column_auto_fit(self, ws, header_value, cell_value, column_index):
+        """Resize a worksheet column to fit its header and cell content.
+
+        Width is clamped between 15 and 60 characters.  An extra 5 chars of
+        padding is added when the cell value is entirely uppercase.
+
+        Args:
+            ws: Target openpyxl worksheet.
+            header_value (str): Text of the column header.
+            cell_value: Data value being written to the cell.
+            column_index (int): 1-based column index to resize.
+        """
         max_column_width = 60
         min_column_width = 15
 
@@ -72,8 +113,7 @@ class YamlToExcel (object):
         column_width = ws.column_dimensions[get_column_letter(
             column_index)].width
 
-        # TODO this should never be None. Find out why
-        if (column_width == None):
+        if column_width is None:
             column_width = 0
 
         if column_value_width > column_width:
@@ -82,16 +122,28 @@ class YamlToExcel (object):
         if column_header_width > column_width:
             column_width = column_header_width + 5
 
-        if column_width > max_column_width:
-            column_width = max_column_width
-
-        if column_width < min_column_width:
-            column_width = min_column_width
+        column_width = min(column_width, max_column_width)
+        column_width = max(column_width, min_column_width)
 
         ws.column_dimensions[get_column_letter(
             column_index)].width = column_width
 
     def add_column_header(self, ws, column_name, value, hostname, row_index):
+        """Return the column index for *column_name*, creating the header if absent.
+
+        Scans row 1 for a header matching *column_name* (tolerating a leading
+        or trailing ``@``).  Appends a new header column when none is found.
+
+        Args:
+            ws: Target openpyxl worksheet.
+            column_name (str): Header text to locate or create.
+            value: Data value about to be written (used for width fitting).
+            hostname (str): Current hostname label.
+            row_index (int): Current data-row index.
+
+        Returns:
+            dict: ``{"row": row_index, "column": column_id}``.
+        """
         logging.debug("####################### %s %s %s ",
                       column_name, value, hostname)
 
@@ -103,7 +155,10 @@ class YamlToExcel (object):
             cell_header_value = ws.cell(row=row_id, column=column_id).value
             logging.debug("$$ cell_header_value :: %s %s ",
                           cell_header_value, column_name)
-            if cell_header_value == column_name or (column_name and cell_header_value and (cell_header_value == column_name[1:] or cell_header_value[1:] == column_name)):
+            if (cell_header_value == column_name
+                    or (column_name and cell_header_value
+                        and (cell_header_value == column_name[1:]
+                             or cell_header_value[1:] == column_name))):
                 logging.debug(
                     "###Existing column header found in the sheet....")
                 existing_column_id = column_id
@@ -121,26 +176,38 @@ class YamlToExcel (object):
         return row_column_index
 
     def add_plain_dict_data(self, ws, repeatData, hostname, rIndex=1, addColumnHeader=True):
+        """Write a flat ``OrderedDict`` of key/value pairs as a new worksheet row.
+
+        For each key in *repeatData*, resolves (or creates) the column header
+        then writes the hostname and value into the next available row.
+
+        Args:
+            ws: Target openpyxl worksheet.
+            repeatData (OrderedDict): Flat mapping of column-name → cell-value.
+            hostname (str): Value written to the ``host`` column.
+            rIndex (int): Current logical row index (returned incremented).
+            addColumnHeader (bool): Unused – kept for API compatibility.
+
+        Returns:
+            int: Updated row index after writing.
+        """
         logging.debug("RepeatData ::::::::::::::::::: %s ", repeatData)
         tempcolx = 2
         tempRIndex = ws.max_row
-        if type(repeatData) is OrderedDict:
+        if isinstance(repeatData, OrderedDict):
             for repkey in repeatData:
 
                 row_column_index = self.add_column_header(ws, repkey, str(
                     repeatData[repkey]), hostname, tempRIndex)
-                row_column_index = self.add_column_header(ws, repkey, str(
-                    repeatData[repkey]), hostname, tempRIndex)
 
                 column_index = 1
-                if row_column_index != None:
+                if row_column_index is not None:
                     column_index = row_column_index['column']
                     row_index = row_column_index['row']
-                    if column_index == None:
+                    if column_index is None:
                         column_index = ws.max_column + 1
                     if row_index:
-                        if row_index > tempRIndex:
-                            tempRIndex = row_index
+                        tempRIndex = max(tempRIndex, row_index)
 
                 ws.cell(row=tempRIndex + 1, column=1).value = hostname
                 ws.cell(row=tempRIndex + 1, column=column_index).value = self.parse_cell_value(repeatData[repkey])
@@ -156,20 +223,33 @@ class YamlToExcel (object):
         return rIndex
 
     def build_dict_data(self, data, dictData=None, prefix="", put_unique_identifier=False):
+        """Flatten a nested ``OrderedDict`` into a single-level dot-keyed mapping.
+
+        Recursively walks *data*, building dot-separated keys from *prefix*.
+        List values are skipped.  When *put_unique_identifier* is ``True`` the
+        first key matching ``['id', 'name', 'group']`` is prefixed with ``@``.
+
+        Args:
+            data (OrderedDict): Source nested mapping to flatten.
+            dictData (OrderedDict | None): Accumulator; created when ``None``.
+            prefix (str): Dot-separated key path built up during recursion.
+            put_unique_identifier (bool): Mark the unique identifier key.
+
+        Returns:
+            OrderedDict: Flattened mapping with dot-separated keys.
+        """
         logging.debug("Building dict data ....%s %s %s ",
                       data, dictData, put_unique_identifier)
         if not dictData:
             dictData = OrderedDict()
         tDictData = OrderedDict(dictData)
 
-        pre_defined_unique_identifiers = ['id', 'name', 'group']
-
         is_pk_exist = False
         unique_key = ""
         if put_unique_identifier:
-            for pk in pre_defined_unique_identifiers:
+            for pk in PRE_DEFINED_UNIQUE_IDENTIFIERS:
                 logging.debug("Unique key %s ", pk)
-                if type(data) is OrderedDict:
+                if isinstance(data, OrderedDict):
                     if pk in data:
                         logging.debug(
                             "Pre defined unique identifier exist... %s", pk)
@@ -177,7 +257,7 @@ class YamlToExcel (object):
                         unique_key = pk
                         break
 
-        if type(data) is OrderedDict:
+        if isinstance(data, OrderedDict):
             for key in data:
                 logging.debug("Key %s ", key)
                 logging.debug("Value %s", data[key])
@@ -188,15 +268,15 @@ class YamlToExcel (object):
                     else:
                         put_unique_identifier = False
 
-                if type(data[key]) is OrderedDict:
+                if isinstance(data[key], OrderedDict):
                     if prefix == "":
-                        if put_unique_identifier == True:
+                        if put_unique_identifier:
                             temp_prefix = '@' + key
                             put_unique_identifier = False
                         else:
                             temp_prefix = key
                     else:
-                        if put_unique_identifier == True:
+                        if put_unique_identifier:
                             if prefix.find('+') >= 0:
                                 temp_prefix = prefix + '.' + '@' + key
                                 put_unique_identifier = False
@@ -209,15 +289,15 @@ class YamlToExcel (object):
                     tempDictData = self.build_dict_data(
                         data[key], tDictData, temp_prefix)
                     tDictData.update(tempDictData)
-                elif type(data[key]) is not list:
+                elif not isinstance(data[key], list):
                     if prefix == "":
-                        if put_unique_identifier == True:
+                        if put_unique_identifier:
                             tDictData['@' + key] = data[key]
                             put_unique_identifier = False
                         else:
                             tDictData.update(OrderedDict({key: data[key]}))
                     else:
-                        if put_unique_identifier == True:
+                        if put_unique_identifier:
                             if prefix.find('+') >= 0:
                                 tempPre = prefix + '.' + '@' + key
                                 put_unique_identifier = False
@@ -232,13 +312,23 @@ class YamlToExcel (object):
         return tDictData
 
     def build_list_data(self, data, listDataParam=None):
+        """Extract keys whose values are lists from *data*.
+
+        Args:
+            data (OrderedDict): Source mapping to inspect.
+            listDataParam (OrderedDict | None): Accumulator; created when ``None``.
+
+        Returns:
+            OrderedDict: Mapping of key → list for every list-valued key in
+            *data*, or an empty ``OrderedDict`` if none exist.
+        """
         logging.debug("Building list data.... %s %s ", data, listDataParam)
         if not listDataParam:
             listDataParam = OrderedDict()
 
-        if type(data) is OrderedDict:
+        if isinstance(data, OrderedDict):
             for key in data:
-                if (type(data[key]) is list):
+                if isinstance(data[key], list):
                     logging.debug(
                         "-->>>>>>type(data[key]):::: %s", type(data[key]))
                     listDataParam[key] = data[key]
@@ -246,6 +336,25 @@ class YamlToExcel (object):
         return listDataParam
 
     def parse_recursive_data(self, ws, data, oldDictData=None, hostname="", add_column_header=True, rowIndex=1, colIndex=2, prefix=""):
+        """Recursively write nested YAML data to a worksheet.
+
+        Handles dicts-containing-lists, plain lists, and plain dicts.
+        Delegates leaf-row writing to :meth:`add_plain_dict_data`.
+
+        Args:
+            ws: Target openpyxl worksheet.
+            data: YAML node (``OrderedDict``, ``list``, or scalar).
+            oldDictData (OrderedDict | None): Accumulated flat data from parent
+                levels merged into each row.
+            hostname (str): Value for the ``host`` column.
+            add_column_header (bool): Whether to create column headers.
+            rowIndex (int): Current row counter.
+            colIndex (int): Starting column index (unused, kept for compat).
+            prefix (str): Dot-separated key path from enclosing list context.
+
+        Returns:
+            int: Updated row index after writing all rows.
+        """
         if not oldDictData:
             oldDictData = OrderedDict()
 
@@ -270,14 +379,14 @@ class YamlToExcel (object):
                     ws, listData[listKey], tempPlainData, hostname, add_column_header, rowIndex, colIndex, temp_prefix)
                 # rowIndex = rowIndex + 1
 
-        if type(data) is list:
+        if isinstance(data, list):
             logging.debug("$$$$$$$$$$$$$$$List.... %s ", data)
             tempRowIndex = rowIndex
             addColumnHeader = add_column_header
             for tempData in data:
-                if type(tempData) is list:
+                if isinstance(tempData, list):
                     logging.debug("To handle list ")
-                elif type(tempData) is OrderedDict:
+                elif isinstance(tempData, OrderedDict):
                     logging.debug(
                         "####################################### Dict .......... %s %s %s ", tempData, tempOldDictData, prefix)
                     temp_listData = self.build_list_data(tempData)
@@ -295,14 +404,13 @@ class YamlToExcel (object):
                     tempRepeatData = tempOldDictData
                     tempRepeatData[prefix] = tempData
                     tempRowIndex = self.add_plain_dict_data(
-                        ws, style, tempRepeatData, hostname, tempRowIndex, addColumnHeader)
+                        ws, tempRepeatData, hostname, tempRowIndex, addColumnHeader)
 
-            if tempRowIndex > rowIndex:
-                rowIndex = tempRowIndex
+            rowIndex = max(rowIndex, tempRowIndex)
 
-        if type(data) is OrderedDict:
+        if isinstance(data, OrderedDict):
             for temp_key in data:
-                if type(data[temp_key]) is OrderedDict:
+                if isinstance(data[temp_key], OrderedDict):
                     temp_listData = self.build_list_data(data[temp_key])
                     if not temp_listData:
                         logging.debug("Not a list")
@@ -312,12 +420,31 @@ class YamlToExcel (object):
                         else:
                             temp_prefix = prefix + '.' + temp_key + '+'
                         rowIndex = self.parse_recursive_data(
-                            ws, style, data[temp_key], oldDictData, hostname, add_column_header, rowIndex, colIndex, temp_prefix)
+                            ws, data[temp_key], oldDictData, hostname, add_column_header, rowIndex, colIndex, temp_prefix)
                         logging.debug("rowIndex :: %s ", rowIndex)
 
         return rowIndex
 
     def generate_sheet_data(self, ws, data, oldDictData=None, hostname="", add_unique_field=False, add_column_header=True, rowIndex=1, colIndex=2, prefix=""):
+        """Write a top-level YAML dict value to a worksheet, handling all nesting.
+
+        Flat mappings are written directly; mappings containing lists are
+        decomposed and delegated to :meth:`parse_recursive_data`.
+
+        Args:
+            ws: Target openpyxl worksheet.
+            data (OrderedDict | list): YAML value to write.
+            oldDictData (OrderedDict | None): Carry-over flat data from caller.
+            hostname (str): Value for the ``host`` column.
+            add_unique_field (bool): Mark the unique identifier key with ``@``.
+            add_column_header (bool): Whether to create column headers.
+            rowIndex (int): Current row counter.
+            colIndex (int): Starting column index (unused, kept for compat).
+            prefix (str): Dot-separated key path prefix.
+
+        Returns:
+            int: Updated row index after writing.
+        """
         if not oldDictData:
             oldDictData = OrderedDict()
 
@@ -368,21 +495,30 @@ class YamlToExcel (object):
         return rowIndex
 
     def parse_yaml_files(self, wb, ws, file_content, hostname, sheet_last_row_index):
+        """Parse a loaded YAML document and distribute its data into *wb*.
+
+        Iterates over top-level keys and dispatches:
+
+        * ``OrderedDict`` values → a named sheet.
+        * ``list`` values → a sheet named ``<key>+``.
+        * Scalars → the ``base`` sheet (host / name / value columns).
+
+        Args:
+            wb: Target openpyxl workbook.
+            ws: The ``base`` worksheet.
+            file_content (OrderedDict): Parsed YAML content for one host.
+            hostname (str): YAML file path used as the host identifier.
+            sheet_last_row_index (dict): Mutable mapping of sheet name → last
+                written row index, updated in place.
+        """
         for key in file_content:
-            if type(key) is OrderedDict:
+            if isinstance(key, OrderedDict):
                 logging.warning("The base list is empty.")
                 return
-            keyValuePair = []
-            keyValuePair.append(key)
             value = file_content[key]
 
-            if type(value) is OrderedDict:
-                is_sheet_already_exist = False
-                try:
-                    wb[key]
-                    is_sheet_already_exist = True
-                except:
-                    logging.debug("Sheet doesn't exist. Creating new sheet.")
+            if isinstance(value, OrderedDict):
+                is_sheet_already_exist = key in wb.sheetnames
 
                 temp_row_index = 1
                 add_column_header = True
@@ -394,22 +530,16 @@ class YamlToExcel (object):
                     additionalws = wb.create_sheet(title=key)
                     additionalws.cell(row=1, column=1).value = "host"
 
-                tempValue = value
                 additional_sheet_row_index = self.generate_sheet_data(
                     additionalws, value, OrderedDict(), hostname, False, add_column_header, temp_row_index)
                 sheet_last_row_index[key] = additional_sheet_row_index
 
-            elif type(value) is list:
+            elif isinstance(value, list):
 
                 logging.debug(
                     "\nIt is a list -- Key :: %s Value :: %s ", key, value)
                 key = key + "+"
-                is_sheet_already_exist = False
-                try:
-                    wb[key]
-                    is_sheet_already_exist = True
-                except:
-                    logging.debug("Sheet doesn't exist. Creating new sheet.")
+                is_sheet_already_exist = key in wb.sheetnames
 
                 tempRowIndex = 1
                 add_column_header = True
@@ -417,15 +547,14 @@ class YamlToExcel (object):
                     additionalws = wb[key]
                     existing_sheet_row_index = sheet_last_row_index[key]
                     tempRowIndex = existing_sheet_row_index
-                    # add_column_header = False
                 else:
                     additionalws = wb.create_sheet(title=key)
 
                 need_remove_sheet = False
                 for listTemp in value:
                     logging.debug("\n listTemp ::: %s ", listTemp)
-                    if type(listTemp) is list or type(listTemp) is OrderedDict:
-                        testRowIndex = self.generate_sheet_data(
+                    if isinstance(listTemp, (list, OrderedDict)):
+                        self.generate_sheet_data(
                             additionalws, listTemp, OrderedDict(), hostname, True, False, tempRowIndex)
                         tempRowIndex = tempRowIndex + 1
                     else:
@@ -449,8 +578,8 @@ class YamlToExcel (object):
 
                 sheet_last_row_index[key] = tempRowIndex
             else:
-                logging.debug("base:" + key + "\n")
-                logging.debug("type:" + str(type(value)) + "\n")
+                logging.debug("base: %s", key)
+                logging.debug("type: %s", type(value))
                 logging.debug(self.parse_cell_value(file_content[key]))
 
                 base_sheet_rowx = sheet_last_row_index['base']
@@ -469,16 +598,29 @@ class YamlToExcel (object):
                 sheet_last_row_index['base'] = base_sheet_rowx + 1
 
     def parse_cell_value(self, value):
-        if type(value) is bool:
+        """Coerce *value* to an Excel-safe type.
+
+        ``bool`` → ``str``; ``int`` stays ``int``; everything else → ``str``.
+
+        Args:
+            value: Raw Python value from the YAML document.
+
+        Returns:
+            int | str: A value safe to write into an openpyxl cell.
+        """
+        if isinstance(value, bool):
             value = str(value)
-        elif type(value) is int:
-            value = value
-        else:
+        elif not isinstance(value, int):
             value = str(value)
 
         return value
 
     def put_border(self, wb):
+        """Apply a thin black border to every cell in every sheet of *wb*.
+
+        Args:
+            wb: openpyxl workbook to decorate.
+        """
         thin = Side(border_style="thin", color="000000")
         border = Border(top=thin, left=thin, right=thin, bottom=thin)
 
@@ -488,6 +630,13 @@ class YamlToExcel (object):
                     cell.border = border
 
     def convert_data(self):
+        """Run the YAML → Excel conversion and save the workbook.
+
+        Creates a workbook with a ``base`` sheet, registers ``value`` and
+        ``header`` named styles, loads each YAML file from :attr:`file_params`,
+        and saves to the explicit ``.xlsx`` path when provided, otherwise to
+        ``all.xlsx``.
+        """
         wb = Workbook()
 
         ws = wb.active
@@ -542,15 +691,13 @@ class YamlToExcel (object):
                             logging.error(
                                 "Invalid spreadsheet file extension given.")
                             return
-                        else:
-                            yaml_file_count = yaml_file_count + 1
+                        yaml_file_count = yaml_file_count + 1
                 else:
                     if not file_name.endswith(".yaml") and not file_name.endswith(".yml"):
                         logging.error(
                             "'%s' file is an invalid file. Please give .yaml or .yml file.", file_name)
                         return
-                    else:
-                        yaml_file_count = yaml_file_count + 1
+                    yaml_file_count = yaml_file_count + 1
 
             count = count + 1
 
@@ -559,26 +706,30 @@ class YamlToExcel (object):
                 'Please give at least one .yaml or .yml file as input.')
             return
 
-        isEmpty = True
+        is_empty = True
         for file_name in self.file_params:
             if file_name.endswith(".yaml") or file_name.endswith(".yml"):
-                logging.debug("YAML or YML file : " + file_name)
+                logging.debug("YAML or YML file: %s", file_name)
 
-                with open(file_name, 'r') as stream:
-                    content = ordered_load(stream, yaml.SafeLoader)
+                with open(file_name, 'r', encoding='utf-8') as stream:
+                    content = ordered_load(stream)
 
                 host_name = file_name
                 self.parse_yaml_files(
                     wb, ws, content, host_name, sheet_last_row_index)
-                isEmpty = False
+                is_empty = False
 
-        if not isEmpty:
-            #self.put_border(wb)
+        if not is_empty:
             logging.debug("YAML to excel conversion completed.")
             if spreadsheet_file_name:
                 wb.save(spreadsheet_file_name)
             else:
                 wb.save("all.xlsx")
 
+def main():
+    """Entry point for the ``yaml2xls`` console script."""
+    YamlToExcel(sys.argv[1:]).convert_data()
+
+
 if __name__ == '__main__':
-    YamlToExcel(sys.argv).convert_data()
+    main()

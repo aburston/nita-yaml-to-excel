@@ -12,12 +12,14 @@ Third-Party Code: This code may depend on other components under separate copyri
 
 ******************************************************** """
 
+import os
+import unittest
+
+import yaml
+from ddt import ddt, data
+
 from yamltoexcel import yaml2xls
 from yamltoexcel import xls2yaml
-import unittest
-import yaml
-import os
-from ddt import ddt, data
 
 
 one_level_hierarchy_simple_dict = """
@@ -300,6 +302,7 @@ test_interface_rota:
 
 @ddt
 class ParserTestCase(unittest.TestCase):
+    """Round-trip YAML→Excel→YAML tests using ddt parameterisation."""
 
     def tearDown(self):
         yaml_file = 'test.yaml'
@@ -327,15 +330,17 @@ class ParserTestCase(unittest.TestCase):
           complex_list_with_integers
           )
     def testSimpleStruct(self, value):
-        ini_cont = yaml.load(value)
-        with open('test.yaml', 'w') as outfile:
+        """Round-trip YAML through Excel and back; result must equal the original."""
+        ini_cont = yaml.safe_load(value)
+        with open('test.yaml', 'w', encoding='utf-8') as outfile:
             outfile.write(
                 yaml.dump(ini_cont, default_flow_style=False, explicit_start=True))
         yaml2xls_instance = yaml2xls.YamlToExcel(['test.yaml'])
         yaml2xls_instance.convert_data()
         xls2yaml_instance = xls2yaml.ExcelToYaml('all.xlsx', './')
         xls2yaml_instance.convert_data()
-        final_cont = yaml.load(open('test.yaml', 'r'))
+        with open('test.yaml', 'r', encoding='utf-8') as f:
+            final_cont = yaml.safe_load(f)
         self.assertDictEqual(ini_cont, final_cont)
 
 
