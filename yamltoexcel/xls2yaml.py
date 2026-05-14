@@ -14,8 +14,6 @@ Third-Party Code: This code may depend on other components under separate copyri
 
 ********************************************************"""
 
-import ast
-import json
 import logging
 import os
 import sys
@@ -31,8 +29,22 @@ pre_defined_unique_identifiers = ['id', 'name', 'group']
 
 
 def ordered_dump(data, stream=None, Dumper=yaml.Dumper, **kwds):
-    class OrderedDumper(Dumper):
-        pass
+    """Dump *data* to YAML while preserving ``OrderedDict`` key order.
+
+    Registers representers for ``OrderedDict`` (plain mapping) and ``None``
+    (empty string) before delegating to :func:`yaml.dump`.
+
+    Args:
+        data: Python object to serialise.
+        stream: File-like object to write to, or ``None`` to return a string.
+        Dumper (yaml.Dumper): Base PyYAML Dumper class.
+        **kwds: Extra keyword arguments forwarded to :func:`yaml.dump`.
+
+    Returns:
+        str | None: YAML string when *stream* is ``None``, else ``None``.
+    """
+    class OrderedDumper(Dumper):  # pylint: disable=too-few-public-methods
+        """Private YAML dumper subclass with OrderedDict and None representers."""
 
     def _dict_representer(dumper, data):
         return dumper.represent_mapping(
@@ -42,42 +54,79 @@ def ordered_dump(data, stream=None, Dumper=yaml.Dumper, **kwds):
     OrderedDumper.add_representer(
         type(None),
         lambda dumper, value: dumper.represent_scalar(
-            u'tag:yaml.org,2002:null', '')
+            'tag:yaml.org,2002:null', '')
     )
     return yaml.dump(data, stream, OrderedDumper, **kwds)
 
 
 def stripper(self, data):
+    """Recursively remove empty ``OrderedDict`` values from *data*.
+
+    Drops keys whose value is an empty ``OrderedDict`` or the bare ``list``
+    type object; nested dicts are stripped recursively.
+
+    Args:
+        self: Unused – present because the call site passes ``self``.
+        data (OrderedDict): The mapping to clean.
+
+    Returns:
+        OrderedDict: A new mapping with empty-dict entries removed.
+    """
     new_data = OrderedDict()
     for k, v in data.items():
         if isinstance(v, OrderedDict):
             v = stripper(self, v)
-        if not v in (list, OrderedDict()):
+        if v not in (list, OrderedDict()):
             new_data[k] = v
     return new_data
 
 
 class ExcelToYaml(object):
+    """Convert an Excel workbook produced by ``YamlToExcel`` back to YAML files.
+
+    Sheet layout conventions assumed:
+
+    * **base** — three columns (``host``, ``name``, ``value``) for scalars.
+    * **Named sheets** — columns are dot-path keys; rows are per-host data.
+    * **Sheets ending with ``+``** — treated as YAML list values.
+    """
 
     # -----------------------------------------------------------------------
     # CONSTRUCTOR
     # -----------------------------------------------------------------------
 
     def __init__(self, workbook_name_param, dest_dir_param):
+        """Initialise the converter.
 
+        Args:
+            workbook_name_param (str): Path to the ``.xlsx`` workbook to read.
+            dest_dir_param (str): Directory where output YAML files are written.
+
+        Raises:
+            Exception: If either argument is an empty string.
+        """
         if workbook_name_param == "":
             logging.error("Workbook name required.")
-            raise Exception("Workbook name required.")
+            raise ValueError("Workbook name required.")
         if dest_dir_param == "":
             logging.error("Destination directory required.")
-            raise Exception("Destination directory required.")
+            raise ValueError("Destination directory required.")
 
         self.workbook_name = workbook_name_param
         self.dest_dir = dest_dir_param
         self.sheet_data = OrderedDict()
 
     def write_base_sheet_data(self, base_sheet_data, dest_dir):
+        """Serialise accumulated sheet data to per-host YAML files.
 
+        Strips empty dicts with :func:`stripper`, serialises each host's data
+        with :func:`ordered_dump`, creates intermediate directories as needed,
+        and writes the YAML file to ``<dest_dir>/<hostname>``.
+
+        Args:
+            base_sheet_data (OrderedDict): Mapping of hostname → nested data.
+            dest_dir (str): Root output directory.
+        """
         logging.debug("Base sheet data ::: %s ", base_sheet_data)
         for host_file in base_sheet_data:
 
@@ -99,11 +148,23 @@ class ExcelToYaml(object):
                 host_file_dir = dest_dir + '/' + os.path.dirname(host_file)
                 if not os.path.isdir(host_file_dir):
                     os.makedirs(host_file_dir)
-                with open(dest_dir + '/' + host_file, 'w') as outfile:
+                with open(dest_dir + '/' + host_file, 'w', encoding='utf-8') as outfile:
                     outfile.write(base_yaml_content)
 
     def map_key_value(self, key, value, param_dict):
+        """Map a dot-separated *key* and *value* into a nested ``OrderedDict``.
 
+        Recursively inserts *value* at the appropriate nesting level within
+        *param_dict* by splitting *key* on ``"."``.
+
+        Args:
+            key (str): Dot-separated column header from the spreadsheet.
+            value: Parsed cell value.
+            param_dict (OrderedDict): Target mapping to update.
+
+        Returns:
+            OrderedDict: Updated (or new) mapping containing the key/value.
+        """
         splitted_keys = key.split('.')
         mapped_dict = param_dict
         value = self.parse_cell_value(value)
@@ -129,7 +190,17 @@ class ExcelToYaml(object):
         return mapped_dict
 
     def process_data(self, key, value, hostname, sheet_name):
+        """Store a key/value pair into the in-memory :attr:`sheet_data`.
 
+        Merges the pair into ``sheet_data[hostname][sheet_name]`` via
+        :meth:`map_key_value`, creating new host or sheet entries as needed.
+
+        Args:
+            key (str): Dot-separated column key from the spreadsheet.
+            value: Parsed cell value.
+            hostname (str): The ``host`` column value for this row.
+            sheet_name (str): Name of the worksheet being processed.
+        """
         logging.debug("Key :: %s Value :: %s ", key, value)
 
         if hostname in self.sheet_data.keys():
@@ -156,13 +227,25 @@ class ExcelToYaml(object):
                 self.sheet_data.update(host_dict)
 
     def get_appropriate_array_data(self, unique_field, unique_value, old_data):
+        """Find an existing list entry matching a unique field/value pair.
 
+        Searches *old_data* (a list of ``OrderedDict`` entries) for the first
+        entry whose *unique_field* key equals *unique_value*.
+
+        Args:
+            unique_field (str): Key name to match (e.g. ``"name"``).
+            unique_value: Value to match against.
+            old_data (list | OrderedDict): Previously accumulated data.
+
+        Returns:
+            OrderedDict: The matching entry, or an empty ``OrderedDict``.
+        """
         if old_data:
-            if unique_field != None and unique_value != None:
+            if unique_field is not None and unique_value is not None:
                 logging.debug("Got it.... %s ", type(old_data))
-                if type(old_data) is list:
+                if isinstance(old_data, list):
                     for old_dict_data in old_data:
-                        if type(old_dict_data) is OrderedDict:
+                        if isinstance(old_dict_data, OrderedDict):
                             if unique_field in old_dict_data.keys():
                                 if old_dict_data[unique_field] == unique_value:
                                     return old_dict_data
@@ -170,7 +253,20 @@ class ExcelToYaml(object):
         return OrderedDict()
 
     def build_recursive_data(self, parentKey, dict_data, old_data):
+        """Reconstruct a nested YAML dict from flat spreadsheet row data.
 
+        Processes *dict_data* (with ``+``/``@``-encoded keys) and merges it
+        into *old_data*, handling unique identifiers and nested list markers.
+
+        Args:
+            parentKey (str | None): Key used to match rows when merging into
+                an existing list.
+            dict_data (OrderedDict): Flat row data from the spreadsheet.
+            old_data (OrderedDict | list): Previously accumulated data.
+
+        Returns:
+            OrderedDict: ``{"new_data": ..., "existing_data": ...}``.
+        """
         logging.debug("\ndict_data ::: %s ", dict_data)
         logging.debug(" >>> old_data :: %s ", old_data)
 
@@ -224,18 +320,18 @@ class ExcelToYaml(object):
                 array_data = OrderedDict()
                 previous_data = OrderedDict()
                 temp_array_hierarchy_data = OrderedDict()
-                if type(value) is OrderedDict or type(value) is list:
+                if isinstance(value, (OrderedDict, list)):
                     if old_data:
-                        if type(old_data) is OrderedDict:
+                        if isinstance(old_data, OrderedDict):
                             if temp_key in old_data.keys():
                                 temp_array_hierarchy_data = old_data[temp_key]
                                 first_level_dict_data.update(
                                     OrderedDict({temp_key: old_data[temp_key]}))
 
-                        elif type(old_data) is list:
+                        elif isinstance(old_data, list):
                             for old_data_row in old_data:
                                 if temp_key in old_data_row.keys():
-                                    if (parentKey == None and (unique_field in first_level_dict_data.keys() and unique_field in old_data_row.keys()
+                                    if (parentKey is None and (unique_field in first_level_dict_data.keys() and unique_field in old_data_row.keys()
                                                                and old_data_row[unique_field] == first_level_dict_data[unique_field])):
                                         temp_array_hierarchy_data = old_data_row[temp_key]
                                         parentKey = None
@@ -256,7 +352,7 @@ class ExcelToYaml(object):
                             previous_data = temp_dic_data["existing_data"]
                 else:
                     if old_data:
-                        if type(old_data) is OrderedDict:
+                        if isinstance(old_data, OrderedDict):
                             if temp_key in old_data.keys():
                                 first_level_dict_data.update(
                                     OrderedDict({temp_key: old_data[temp_key]}))
@@ -275,7 +371,7 @@ class ExcelToYaml(object):
                             OrderedDict({temp_key: [array_data]}))
 
             else:
-                if type(value) is not OrderedDict and type(value) is not list:
+                if not isinstance(value, (OrderedDict, list)):
 
                     logging.debug("Not a dict and list %s %s %s",
                                   dict_key, value, type(value))
@@ -301,7 +397,7 @@ class ExcelToYaml(object):
                 if hierarchy_key in first_level_dict_data.keys():
                     temp_array_hierarchy_data = first_level_dict_data[hierarchy_key]
 
-                if type(old_data) is OrderedDict:
+                if isinstance(old_data, OrderedDict):
                     if hierarchy_key in old_data.keys():
                         temp_array_hierarchy_data = old_data[hierarchy_key]
 
@@ -313,7 +409,7 @@ class ExcelToYaml(object):
                     if "new_data" in temp_dic_data.keys():
                         temp_hierarchy_data = temp_dic_data["new_data"]
 
-                if type(old_data) is OrderedDict:
+                if isinstance(old_data, OrderedDict):
                     if hierarchy_key in old_data.keys():
                         temp_hierarchy_data.update(old_data[hierarchy_key])
 
@@ -326,7 +422,19 @@ class ExcelToYaml(object):
         return OrderedDict({"new_data":  first_level_dict_data, "existing_data": existing_data})
 
     def add_hierarical_data(self, parentKey, dict_data, hostname, sheet_name, is_list=True):
+        """Merge *dict_data* into the hierarchical in-memory data store.
 
+        Delegates to :meth:`build_recursive_data` and inserts the result under
+        ``sheet_data[hostname][sheet_name]``.  Appends to a list when
+        *is_list* is ``True``; updates the sheet dict otherwise.
+
+        Args:
+            parentKey (str | None): Row identifier key for list merging.
+            dict_data (OrderedDict): Flat row data to reconstruct.
+            hostname (str): Host key in :attr:`sheet_data`.
+            sheet_name (str): Sheet key in the host sub-dict.
+            is_list (bool): When ``True``, wrap the result in a list.
+        """
         if hostname in self.sheet_data.keys():
             temp_host_data = self.sheet_data[hostname]
             if sheet_name in temp_host_data.keys():
@@ -389,7 +497,18 @@ class ExcelToYaml(object):
             self.sheet_data.update(host_dict)
 
     def process_list_data(self, parentKey, dict_data, hostname, sheet_name):
+        """Route list-type row data into the appropriate in-memory structure.
 
+        Inspects *dict_data* for ``+``-encoded keys (nested lists) and
+        dispatches to :meth:`add_hierarical_data` with the appropriate
+        ``is_list`` flag and stripped sheet name.
+
+        Args:
+            parentKey (str | None): Row identifier key for list merging.
+            dict_data (OrderedDict): Row data from a list-type sheet.
+            hostname (str): Host identifier.
+            sheet_name (str): Raw sheet name (may include trailing ``+``).
+        """
         logging.debug(dict_data)
         logging.debug("keys::::::::::::::::::::::::: %s ", dict_data.keys())
 
@@ -446,17 +565,36 @@ class ExcelToYaml(object):
                     parentKey, dict_data, hostname, sheet_name, False)
 
     def parse_cell_value(self, value):
+        """Coerce a raw Excel cell value to a YAML-appropriate Python type.
 
+        ``"None"`` strings are converted to ``None``; ``float`` whole numbers
+        are converted to ``int``.
+
+        Args:
+            value: Raw cell value from openpyxl.
+
+        Returns:
+            The coerced value.
+        """
         if value == "None":
             value = None
-        if type(value) is float:
+        if isinstance(value, float):
             value = int(value)
 
         return value
 
     def process_by_sheet(self, wb, sheet_name):
+        """Read one worksheet and populate :attr:`sheet_data` with its content.
 
-        #sheet = wb.sheet_by_name(sheet_name)
+        Dispatches based on sheet name:
+
+        * **base** — reads ``host``/``name``/``value`` column layout.
+        * **Other sheets** — reads dot-path column headers per row.
+
+        Args:
+            wb: Loaded openpyxl workbook.
+            sheet_name (str): Name of the sheet to process.
+        """
         sheet = wb[sheet_name]
         if sheet_name == "base":
             logging.debug(
@@ -519,7 +657,6 @@ class ExcelToYaml(object):
             logging.debug("Other Sheets :: %s ", sheet_name)
             keys = []
             values = []
-            keys_count = 0
             for row in range(1,sheet.max_row+1):
                 is_header_row = False
                 i = 0
@@ -568,7 +705,7 @@ class ExcelToYaml(object):
                     array_data = OrderedDict()
 
                 if array_data:
-                    if type(array_data) is OrderedDict:
+                    if isinstance(array_data, OrderedDict):
                         parentKey = None
                         for key in pre_defined_unique_identifiers:
                             if "@"+key in array_data.keys():
@@ -580,7 +717,12 @@ class ExcelToYaml(object):
         logging.debug(self.sheet_data)
 
     def convert_data(self):
+        """Run the Excel → YAML conversion.
 
+        Loads the workbook at :attr:`workbook_name`, iterates over every sheet
+        calling :meth:`process_by_sheet`, and writes accumulated data to YAML
+        files in :attr:`dest_dir` after each sheet.
+        """
         workbook = load_workbook(self.workbook_name)
         logging.debug(workbook.sheetnames)
 
@@ -596,7 +738,11 @@ class ExcelToYaml(object):
 
 
 def main():
+    """Entry point for the ``xls2yaml`` console script.
 
+    Expects exactly two command-line arguments: the workbook path and the
+    destination directory.  Prints usage and returns early on wrong arg count.
+    """
     logging.debug(len(sys.argv))
     if len(sys.argv) != 3:
         logging.error(
